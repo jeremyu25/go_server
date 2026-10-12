@@ -1,15 +1,31 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
+
+	"github.com/jeremyu25/go_server/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+)
+
+var (
+	profaneWords = map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert":  {},
+		"fornax":    {},
+	}
 )
 
 type apiConfig struct {
 	fileServerHits atomic.Int32
+	dbQueries      *database.Queries
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -39,13 +55,22 @@ func (a *apiConfig) resetServerHits(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	godotenv.Load()
+	dbUrl := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbUrl)
+	if err != nil {
+		log.Printf("Error opening DB")
+	}
+	dbQueries := database.New(db)
 	serverMultiplexer := http.ServeMux{}
 	server := http.Server{
 		Handler: &serverMultiplexer,
 		Addr:    ":8080",
 	}
 	indexHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
-	apiCfg := apiConfig{}
+	apiCfg := apiConfig{
+		dbQueries: dbQueries,
+	}
 	serverMultiplexer.Handle("/app/", apiCfg.middlewareMetricsInc(indexHandler))
 	serverMultiplexer.HandleFunc("GET /api/healthz", healthEndpoint)
 	serverMultiplexer.HandleFunc("GET /admin/metrics", apiCfg.getServerHits)
@@ -65,7 +90,7 @@ func validateChirpEndpoint(w http.ResponseWriter, r *http.Request) {
 		Body string `json:"body"`
 	}
 	type responseBody struct {
-		Valid bool `json:"valid"`
+		CleanedBody string `json:"cleaned_body"`
 	}
 	req := requestBody{}
 	decoder := json.NewDecoder(r.Body)
@@ -77,9 +102,10 @@ func validateChirpEndpoint(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusBadRequest, "Chirp is too long", nil)
 		return
 	}
+	cleanedWords := cleanWords(req.Body)
 	respondWithJson(w, http.StatusOK,
 		responseBody{
-			Valid: true,
+			CleanedBody: cleanedWords,
 		})
 }
 
@@ -108,4 +134,17 @@ func respondWithJson(w http.ResponseWriter, code int, payload any) {
 	}
 	w.WriteHeader(code)
 	w.Write(dat)
+}
+
+func cleanWords(rawString string) string {
+	cleanedWords := []string{}
+	for word := range strings.SplitSeq(rawString, " ") {
+		_, found := profaneWords[word]
+		if found {
+			cleanedWords = append(cleanedWords, "****")
+		} else {
+			cleanedWords = append(cleanedWords, word)
+		}
+	}
+	return strings.Join(cleanedWords, " ")
 }
