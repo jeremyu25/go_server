@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"sync/atomic"
 
 	"github.com/jeremyu25/go_server/internal/database"
@@ -26,6 +25,7 @@ var (
 type apiConfig struct {
 	fileServerHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -35,28 +35,10 @@ func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
-func (a *apiConfig) getServerHits(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(200)
-	responseString := fmt.Sprintf(`<html>
-  <body>
-    <h1>Welcome, Chirpy Admin</h1>
-    <p>Chirpy has been visited %d times!</p>
-  </body>
-	</html>`, a.fileServerHits.Load())
-	w.Write([]byte(responseString))
-}
-
-func (a *apiConfig) resetServerHits(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
-	a.fileServerHits.Swap(0)
-	w.Write([]byte("Reset hits to 0\n"))
-}
-
 func main() {
 	godotenv.Load()
 	dbUrl := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
 	db, err := sql.Open("postgres", dbUrl)
 	if err != nil {
 		log.Printf("Error opening DB")
@@ -70,43 +52,16 @@ func main() {
 	indexHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	apiCfg := apiConfig{
 		dbQueries: dbQueries,
+		platform:  platform,
 	}
 	serverMultiplexer.Handle("/app/", apiCfg.middlewareMetricsInc(indexHandler))
-	serverMultiplexer.HandleFunc("GET /api/healthz", healthEndpoint)
 	serverMultiplexer.HandleFunc("GET /admin/metrics", apiCfg.getServerHits)
 	serverMultiplexer.HandleFunc("POST /admin/reset", apiCfg.resetServerHits)
+	serverMultiplexer.HandleFunc("GET /api/healthz", healthEndpoint)
 	serverMultiplexer.HandleFunc("POST /api/validate_chirp", validateChirpEndpoint)
+	serverMultiplexer.HandleFunc("POST /api/users", apiCfg.createUser)
+	fmt.Println("Server is up and listening...")
 	server.ListenAndServe()
-}
-
-func healthEndpoint(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
-	w.Write([]byte("OK"))
-}
-
-func validateChirpEndpoint(w http.ResponseWriter, r *http.Request) {
-	type requestBody struct {
-		Body string `json:"body"`
-	}
-	type responseBody struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
-	req := requestBody{}
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&req); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error decoding request", err)
-		return
-	}
-	if len(req.Body) > 140 {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long", nil)
-		return
-	}
-	cleanedWords := cleanWords(req.Body)
-	respondWithJson(w, http.StatusOK,
-		responseBody{
-			CleanedBody: cleanedWords,
-		})
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string, err error) {
@@ -134,17 +89,4 @@ func respondWithJson(w http.ResponseWriter, code int, payload any) {
 	}
 	w.WriteHeader(code)
 	w.Write(dat)
-}
-
-func cleanWords(rawString string) string {
-	cleanedWords := []string{}
-	for word := range strings.SplitSeq(rawString, " ") {
-		_, found := profaneWords[word]
-		if found {
-			cleanedWords = append(cleanedWords, "****")
-		} else {
-			cleanedWords = append(cleanedWords, word)
-		}
-	}
-	return strings.Join(cleanedWords, " ")
 }
